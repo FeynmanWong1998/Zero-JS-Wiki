@@ -493,18 +493,15 @@ def index():
     query = request.args.get("q", "").strip()
     safe_query = escape_html(query) if query else ""
     if query:
-
-
-    # 转义 LIKE 通配符 % 和 _
+        # 转义 LIKE 通配符 % 和 _
         escaped_query = query.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')
-
         pages = db.execute(
             "SELECT slug, updated_at FROM pages WHERE slug LIKE ? ESCAPE '\\' ORDER BY updated_at DESC",
             (f"%{escaped_query}%",)
         ).fetchall()
     else:
         pages = db.execute("SELECT slug, updated_at FROM pages ORDER BY updated_at DESC").fetchall()
-
+ 
     list_html = ""
     if pages:
         items = "".join(
