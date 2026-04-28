@@ -250,7 +250,7 @@ app.jinja_env.globals["csrf_token"] = generate_csrf_token
 
 # 服务端验证码存储（内存，单 worker，带过期清理）
 captcha_store = {}
-captcha_lock = threading.Lock()   # 如果已经删除了 threading 导入，需要恢复 import threading
+captcha_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Honeypot&Captcha check
@@ -260,9 +260,9 @@ def honeypot_check():
     if request.form.get("email_confirm", "").strip():
         abort(400)
 
-# 图片验证码生成（增强版：6位字符、随机旋转、彩色干扰）
+# 图片验证码生成（6位字符、随机旋转、彩色干扰）
 def generate_captcha_image():
-    """生成 6 位验证码图片，答案存于服务端内存，返回 PNG 字节流"""
+    #生成 6 位验证码图片，答案存于服务端内存，返回 PNG 字节流
     chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
     code = ''.join(random.choices(chars, k=6))
     key = uuid.uuid4().hex
@@ -308,7 +308,7 @@ def generate_captcha_image():
         color = (random.randint(100, 200), random.randint(100, 200), random.randint(100, 200))
         draw.line([(x1, y1), (x2, y2)], fill=color)
 
-    # 高密度噪点
+    # 噪点
     for _ in range(400):
         x = random.randint(0, 159)
         y = random.randint(0, 49)
@@ -791,7 +791,6 @@ def login():
     # 验证码正确，现在记录有效尝试
         record_login_attempt()
 
-
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         db = get_db()
@@ -989,7 +988,7 @@ def setup():
             flash("Welcome! You are now the admin.", "success")
             return redirect(url_for("index"))
     token = generate_csrf_token()
-    c = f"""<div class="notice"><strong>⚠️ First time setup – create the admin account.</strong></div>
+    c = f"""<div class="notice"><strong> First time setup – create the admin account.</strong></div>
 <h1>Setup</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
