@@ -1,6 +1,6 @@
 # Zero-JS Wiki - 极简安全的 Wiki 系统
                                                            
-一个仅150K大小的、基于 Flask + SQLite 的 Wiki，零业务 JavaScript。
+一个仅150K大小的、基于 Python + Flask + SQLite 的 Wiki，零业务 JavaScript。
 
 ![CC0_1.0](https://img.shields.io/badge/License-CC0_1.0-lightgrey.svg "CC0_1.0")  
 
