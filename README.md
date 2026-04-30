@@ -82,7 +82,7 @@
 - SECRET_KEY 由环境变量控制，体验较差-p1
 - 默认主页不会自动生成，需要自行于http://127.0.0.1:4000/edit/home 中修改-p3
 - 无法转义html语法-安全特性？
-- 无法正常设置页内锚点-p3——页内锚点改为`[page]##page`，临时性解决
+- 无法正常设置页内锚点-p3——页内锚点改为 `[page]##page` ，临时性解决
 - 所有时间戳都是UTC-0-p3
 - 注释掉了 SESSION_COOKIE_SECURE，因为HTTP模式下不能设置 Secure cookie，否则 Cookie 不会被发送
 
