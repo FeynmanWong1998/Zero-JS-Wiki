@@ -1,3 +1,9 @@
+## License Compliance
+This project is CC0-1.0. Third-party dependencies (Flask, werkzeug, mistune, Pillow) 
+are BSD-3-Clause / Historical License licensed. See their respective package metadata 
+for full copyright notices.
+
+
 Creative Commons Legal Code
 
 CC0 1.0 Universal
