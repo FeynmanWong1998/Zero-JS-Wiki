@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 """
-Zero-JS Wiki 
+Zero-JS Wiki (Flask + SQLite) — secure, minimal, no business JavaScript
+- Markdown: mistune (auto-fix internal wiki links)
+- CSRF: session token with setup exemption
+- Secret key: forced from environment
+- History limit: 100 entries per page
+- Anti-bruteforce: account lockout, failed delay, honeypot, global rate limit
+- Registration: disabled by default (ALLOW_REGISTRATION=true to enable)
+- Password change for logged-in users
+- XSS protection: all dynamic content escaped
+- Removed IP-based rate limiting (unsuitable for Tor)
+- Global login rate limiter using in-memory queue
+- Admin delete confirmation without JavaScript
 - Run:
    Windows PowerShell: $env:SECRET_KEY="your-key"; python app.py
    Linux/macOS:        export SECRET_KEY="your-key"; python app.py
@@ -52,10 +63,9 @@ if not app.secret_key:
 
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE="Strict",
+    SESSION_COOKIE_SAMESITE="Strict",  #SAMESITE="Lax"也是可以的，主要考虑减少潜在的跨站请求携带 Cookie 的风险
     # Uncomment if HTTPS:
-    # SESSION_COOKIE_SECURE=True,
-        #因为HTTP模式下不能设置 Secure cookie，否则 Cookie 不会被发送；SAMESITE="Lax"也是可以的
+    # SESSION_COOKIE_SECURE=True,  #HTTP模式下不能设置 Secure cookie，否则 Cookie 不会被发送
 )
 DATABASE = os.environ.get("WIKI_DB", "wiki.db")
 # ALLOW_REGISTRATION = False      # 禁止公开注册
@@ -67,7 +77,7 @@ LOCKOUT_DURATION = 1       # 锁定分钟数
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # 全局速率限制阈值（基于 SQLite 实现）
-GLOBAL_LOGIN_MAX = 20        # 每分钟允许的最大登录/注册 POST 请求
+GLOBAL_LOGIN_MAX = 100        # 每分钟允许的最大登录/注册 POST 请求
 GLOBAL_LOGIN_WINDOW = 60     # 窗口秒数
 
 def check_global_login_rate():
@@ -118,10 +128,10 @@ def is_safe_redirect(target):
 def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(DATABASE, check_same_thread=False, timeout=10)
-        #数据库连接设置超时时间
+        # 设置超时并允许跨线程使用（同一线程内 g.db 可复用，避免并发锁问题）
         g.db.row_factory = sqlite3.Row
         g.db.execute("PRAGMA foreign_keys = ON")
-        g.db.execute("PRAGMA journal_mode=WAL")   # 提升并发性能
+        g.db.execute("PRAGMA journal_mode=WAL")   # 启用 WAL 模式，提升读写并发；多 worker 部署时需注意只有一个进程写入，否则可能损坏数据
     return g.db
 
 @app.teardown_appcontext
@@ -129,7 +139,7 @@ def close_db(exception):
     db = g.pop("db", None)
     if db is not None:
         db.close()
-
+#在 login_rate 和 register_rate 表上为 timestamp 列创建索引（177/182）
 def init_db():
     with app.app_context():
         db = get_db()
@@ -163,12 +173,22 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_login_rate_timestamp ON login_rate(timestamp);
             CREATE TABLE IF NOT EXISTS register_rate (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp REAL NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS idx_register_rate_timestamp ON register_rate(timestamp);
+               CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                user_id INTEGER,
+                username TEXT,
+                action TEXT NOT NULL,
+                detail TEXT
+            );
         """)
-        db.commit()
+        db.commit()         
     print(" Database initialized.")
 
 # ---------------------------------------------------------------------------
@@ -218,12 +238,32 @@ def add_security_headers(response):
     response.headers['Referrer-Policy'] = 'no-referrer'         # 不泄露 Referer
     response.headers['X-Content-Type-Options'] = 'nosniff'      # 防止 MIME 类型嗅探
     response.headers['X-Frame-Options'] = 'DENY'                # 禁止页面被嵌入 iframe
-    # 内容安全策略：允许同源资源和内联样式（因为我们要用内联 CSS）以及本站图片
-    response.headers['Content-Security-Policy'] = "default-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:;"
+    # 内容安全策略：减少注入面，明确禁止脚本执行
+    response.headers['Content-Security-Policy'] = (
+        "default-src 'none'; "  #默认拒绝所有资源
+        "connect-src 'self'; "  #允许向本站发起网络请求-预留扩展性，目前不使用
+        "img-src 'self' data:; "  #只允许同源图片和 data: URI-验证码是 data: 格式，必须允许；站内图片也需允许
+        "style-src 'unsafe-inline'; "  #允许内联样式-因为模板里直接嵌入 <style> 块，不得不保留。可考虑未来用外部 CSS 移除它
+        #"script-src 'none'; "  #禁止任何脚本执行,但与js检测脚本冲突
+        "script-src 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #禁止除js检测脚本外的脚本（通过hash判断）
+        "base-uri 'self'; "  #限制 <base> 标签只能指向本站，防止攻击者用 <base> 劫持页面内链接
+        "form-action 'self'; "  #只允许表单提交到本站，防止攻击者把你的表单提交到外部恶意网址
+        "frame-ancestors 'none'; "  #禁止页面被嵌入 <iframe>，防止点击劫持
+    )
     return response
 
 @app.before_request
 def csrf_protect():
+    # 会话空闲超时：120分钟无活动则踢出
+    if "user_id" in session:
+        now = time.time()
+        last = session.get('_last_activity', now)
+        if now - last > 7200:  #120分钟
+            session.clear()
+            flash("Session expired due to inactivity.", "warning")
+            return redirect(url_for("login"))
+        session['_last_activity'] = now
+    #  CSRF 与 session_token 校验
     if request.method == "POST":
         if request.path == "/setup" and not db_has_users():
             return
@@ -260,9 +300,18 @@ def honeypot_check():
     if request.form.get("email_confirm", "").strip():
         abort(400)
 
-# 图片验证码生成（6位字符、随机旋转、彩色干扰）
+#审计日志
+def log_action(action, user_id=None, username=None, detail=""):
+    db = get_db()
+    db.execute(
+        "INSERT INTO audit_log (user_id, username, action, detail) VALUES (?, ?, ?, ?)",
+        (user_id, username, action, detail)
+    )
+    db.commit()
+
+# 图片验证码生成（增强版：6位字符、随机旋转、彩色干扰）
 def generate_captcha_image():
-    #生成 6 位验证码图片，答案存于服务端内存，返回 PNG 字节流
+    """生成 6 位验证码图片，答案存于服务端内存，返回 PNG 字节流"""
     chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
     code = ''.join(random.choices(chars, k=6))
     key = uuid.uuid4().hex
@@ -308,7 +357,7 @@ def generate_captcha_image():
         color = (random.randint(100, 200), random.randint(100, 200), random.randint(100, 200))
         draw.line([(x1, y1), (x2, y2)], fill=color)
 
-    # 噪点
+    # 高密度噪点
     for _ in range(400):
         x = random.randint(0, 159)
         y = random.randint(0, 49)
@@ -324,7 +373,7 @@ def generate_captcha_image():
 
 
 def verify_captcha(user_input):
-    """验证用户输入的验证码（不区分大小写，一次性消费）"""
+    #验证用户输入的验证码（不区分大小写，一次性消费）
     key = session.pop('captcha_key', None)
     if not key:
         return False
@@ -336,7 +385,7 @@ def verify_captcha(user_input):
 
 
 def generate_session_token():
-    return secrets.token_hex(32)
+    return secrets.token_hex(32)  #生成64字符会话令牌
 
 # ---------------------------------------------------------------------------
 # Markdown
@@ -428,7 +477,7 @@ BASE = r"""<!DOCTYPE html>
 </head>
 <body>
 <noscript><div class="js-status js-off"> Strange, it seems the browser's JS is only half disabled? Don't worry, this Wiki works perfectly without JS.</div></noscript>
-<script>document.write('<div class="js-status js-on"> Warning: JS is enabled. It is recommended to disable JS for the safest experience.</div>');</script>
+<script>document.write('<div class="js-status js-on">Warning: JS is enabled. It is recommended to disable JS for the safest experience.</div>');</script>
 
 <nav>
   <a href="/">Home</a>
@@ -501,7 +550,7 @@ def index():
         ).fetchall()
     else:
         pages = db.execute("SELECT slug, updated_at FROM pages ORDER BY updated_at DESC").fetchall()
- 
+
     list_html = ""
     if pages:
         items = "".join(
@@ -580,6 +629,24 @@ def new_page():
         honeypot_check()
         slug = request.form.get("slug", "").strip()
         content_md = request.form.get("content", "")
+
+        # ---------- 限制长度，解决潜在ReDoS风险 ----------
+        if len(content_md) > 200 * 1024:
+            flash("Content is too large. Maximum allowed size is 200 KB.", "error")
+            token = generate_csrf_token()
+            safe_slug = escape_html(slug)
+            safe_content = escape_html(content_md)
+            c = f"""<h1>New Page</h1>
+<form method="post">
+  <input type="hidden" name="_csrf_token" value="{token}">
+  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <label>Slug (URL name): <input type="text" name="slug" required pattern="[a-zA-Z0-9_\\-]+" placeholder="e.g. my-page" value="{safe_slug}"></label>
+  <label>Content (Markdown):</label>
+  <textarea name="content" placeholder="Write here...">{safe_content}</textarea>
+  <input type="submit" value="Create">
+</form>"""
+            return render_template_string(BASE, title="New Page", content=c)
+
         if slug.lower() == "home":
             flash("Please edit the homepage directly.", "warning")
             return redirect(url_for("edit_page", slug="home"))
@@ -631,6 +698,23 @@ def edit_page(slug):
     if request.method == "POST":
         honeypot_check()
         content_md = request.form.get("content", "")
+
+        # ---------- 限制长度，解决潜在ReDoS风险 ----------
+        if len(content_md) > 200 * 1024:
+            flash("Content is too large. Maximum allowed size is 200 KB.", "error")
+            # 重新渲染编辑页面，保留原有内容
+            existing = page["content_md"] if page else ""
+            token = generate_csrf_token()
+            safe_slug = escape_html(slug)
+            c = f"""<h1>{'Edit' if page else 'Create'} “{safe_slug}”</h1>
+<form method="post">
+  <input type="hidden" name="_csrf_token" value="{token}">
+  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <textarea name="content" placeholder="Markdown content...">{escape_html(existing)}</textarea>
+  <input type="submit" value="Save">
+</form>"""
+            return render_template_string(BASE, title=f"Edit {slug}", content=c)
+
         now = datetime.now(timezone.utc).strftime(TIME_FORMAT)
         if page:
             old = page["content_md"]
@@ -780,20 +864,18 @@ def login():
 
         honeypot_check()
 
-    # ---------- 验证码检查 ----------
+    # 验证码检查
         if not verify_captcha(request.form.get("captcha", "")):
             flash("Incorrect answer to the security question.", "error")
             return render_template_string(BASE, title="Login", content=login_form())
 
     # 验证码正确，现在记录有效尝试
         record_login_attempt()
-
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         db = get_db()
         user = db.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
 
-        # 统一错误提示
         if user:
             # 检查锁定（使用 datetime 对象比较）
             locked = False
@@ -805,6 +887,8 @@ def login():
                 except ValueError:
                     pass
             if locked:
+                # 登录失败
+                log_action("login_failed", user_id=user["id"], username=user["username"], detail="account locked")  #审计日志
                 flash("Invalid username or password.", "error")
                 return render_template_string(BASE, title="Login", content=login_form())
 
@@ -822,6 +906,7 @@ def login():
                 session["user_id"] = user["id"]
                 session["username"] = user["username"]
                 session["role"] = user["role"]
+                log_action("login_success", user_id=user["id"], username=user["username"])  #审计日志
                 flash("Logged in.", "success")
                 next_url = request.args.get("next")
                 if next_url and is_safe_redirect(next_url):
@@ -829,6 +914,7 @@ def login():
                 return redirect(url_for("index"))
             else:
                 # 登录失败：递增计数器并可能锁定
+                log_action("login_failed", user_id=user["id"], username=user["username"], detail="wrong password")  #审计日志
                 attempts = (user["failed_attempts"] or 0) + 1
                 locked_until = None
                 if attempts >= LOCKOUT_THRESHOLD:
@@ -837,7 +923,8 @@ def login():
                            (attempts, locked_until, user["id"]))
                 db.commit()
         else:
-            pass
+            #用户不存在
+            log_action("login_failed", username=username, detail="nonexistent user")  #审计日志
 
         flash("Invalid username or password.", "error")
 
@@ -936,6 +1023,7 @@ def register():
                 session["user_id"] = user["id"]
                 session["username"] = username
                 session["role"] = "reader"
+                log_action("register", user_id=user["id"], username=username, detail="reader created")  #审计日志
                 flash("Registered as reader. Ask an admin to become writer.", "success")
                 return redirect(url_for("index"))
 
@@ -985,7 +1073,7 @@ def setup():
             flash("Welcome! You are now the admin.", "success")
             return redirect(url_for("index"))
     token = generate_csrf_token()
-    c = f"""<div class="notice"><strong> First time setup – create the admin account.</strong></div>
+    c = f"""<div class="notice"><strong>⚠️ First time setup – create the admin account.</strong></div>
 <h1>Setup</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
@@ -1029,6 +1117,7 @@ def change_password():
                 db.commit()
                 # 更新当前会话的令牌，这样当前用户不会被踢出
                 session["session_token"] = new_token
+                log_action("password_changed", user_id=user["id"], username=user["username"])  #审计日志
                 flash("Password changed. All other sessions have been invalidated.", "success")
                 return redirect(url_for("index"))
             except Exception as e:
@@ -1073,6 +1162,7 @@ def admin_panel():
           </td>
           <td><a href="/admin/delete_user?user_id={u['id']}" style="color:red">Delete</a></td></tr>"""
     c = f"""<h1>User Management</h1>
+<p><a href="/admin/logs">View Audit Logs</a></p>
 <table style="width:100%;border-collapse:collapse"><tr><th>Username</th><th>Role</th><th>Action</th></tr>{rows}</table>
 <hr><h2>Add User</h2>
 <form method="post" action="/admin/add_user">
@@ -1086,6 +1176,39 @@ def admin_panel():
     return render_template_string(BASE, title="Admin", content=c)
 
 # Separate confirmation page for delete (GET)
+
+@app.route("/admin/logs")
+def admin_logs():
+    check = require_login(role="admin")
+    if check:
+        return check
+    db = get_db()
+    # 获取最近 200 条日志，按时间倒序
+    logs = db.execute(
+        "SELECT * FROM audit_log ORDER BY id DESC LIMIT 200"
+    ).fetchall()
+    rows = ""
+    for l in logs:
+        ts = escape_html(l["timestamp"]) if l["timestamp"] else ""
+        uid = escape_html(str(l["user_id"])) if l["user_id"] else ""
+        uname = escape_html(l["username"]) if l["username"] else ""
+        action = escape_html(l["action"])
+        detail = escape_html(l["detail"]) if l["detail"] else ""
+        rows += f"""<tr>
+          <td>{ts}</td>
+          <td>{uid}</td>
+          <td>{uname}</td>
+          <td>{action}</td>
+          <td>{detail}</td>
+        </tr>"""
+    content = f"""<h1>Audit Logs (Last 200)</h1>
+<table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+  <tr><th>Timestamp</th><th>User ID</th><th>Username</th><th>Action</th><th>Detail</th></tr>
+  {rows}
+</table>
+<p><a href="/admin">← Back to Admin</a></p>"""
+    return render_template_string(BASE, title="Audit Logs", content=content)
+
 @app.route("/admin/delete_user", methods=["GET"])
 def delete_user_confirm():
     check = require_login(role="admin")
@@ -1133,6 +1256,7 @@ def add_user():
                 (username, generate_password_hash(password), role),
             )
             db.commit()
+            log_action("admin_add_user", user_id=session["user_id"], username=session["username"], detail=f"added {username} as {role}")  #审计日志
             flash(f"User “{escape_html(username)}” created.", "success")
         except sqlite3.IntegrityError:
             flash("Username already exists.", "error")
@@ -1158,6 +1282,7 @@ def change_role():
     else:
         db.execute("UPDATE users SET role = ? WHERE id = ?", (new_role, uid))
         db.commit()
+        log_action("admin_change_role", user_id=session["user_id"], username=session["username"], detail=f"user_id {uid} role -> {new_role}")  #审计日志
         flash("Role updated.", "success")
     return redirect(url_for("admin_panel"))
 
@@ -1178,6 +1303,7 @@ def delete_user():
     else:
         db.execute("DELETE FROM users WHERE id = ?", (uid,))
         db.commit()
+        log_action("admin_delete_user", user_id=session["user_id"], username=session["username"], detail=f"deleted user_id {uid}")  #审计日志
         flash("User deleted.", "success")
     return redirect(url_for("admin_panel"))
 
@@ -1238,7 +1364,8 @@ def forbidden(e):
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("="*60)
-    print("  Zero-JS Wiki ")
+    print(" Zero-JS Wiki ")
+    print("WARNING: This application is designed for single-worker deployment only.")
     print("  http://127.0.0.1:4000")
     print("="*60)
     init_db()
