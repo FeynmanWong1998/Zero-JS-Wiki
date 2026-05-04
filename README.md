@@ -111,7 +111,7 @@
 ----
 CC0-1.0  
 captcha图片使用了GGBotNet的Scabber字体；欲了解更多关于此字体的信息，[请访问](https://ggbot.itch.io/scabber-font "Scabber字体")  
-
+第三方依赖（Flask、werkzeug、mistune、Pillow）采用 BSD-3-Clause / 历史许可。完整版权声明请参阅各自的包元数据。
 
 
 ## AI使用声明
