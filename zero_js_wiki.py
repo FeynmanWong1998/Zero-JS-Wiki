@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
 """
 Zero-JS Wiki (Flask + SQLite) — secure, minimal, no business JavaScript
-- Markdown: mistune (auto-fix internal wiki links)
-- CSRF: session token with setup exemption
-- Secret key: forced from environment
-- History limit: 100 entries per page
-- Anti-bruteforce: account lockout, failed delay, honeypot, global rate limit
-- Registration: disabled by default (ALLOW_REGISTRATION=true to enable)
-- Password change for logged-in users
-- XSS protection: all dynamic content escaped
-- Removed IP-based rate limiting (unsuitable for Tor)
-- Global login rate limiter using in-memory queue
-- Admin delete confirmation without JavaScript
+
 - Run:
    Windows PowerShell: $env:SECRET_KEY="your-key"; python app.py
    Linux/macOS:        export SECRET_KEY="your-key"; python app.py
