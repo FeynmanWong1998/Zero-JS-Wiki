@@ -843,7 +843,7 @@ def view_history_version(slug, history_id):
 @app.route("/login", methods=["GET", "POST"])
 def login():
     if not db_has_users():
-        flash("⚠️ No admin account exists. Please set up first.", "warning")
+        flash("No admin account exists. Please set up first.", "warning")
         return redirect(url_for("setup"))
 
     if request.method == "POST":
@@ -1063,7 +1063,7 @@ def setup():
             flash("Welcome! You are now the admin.", "success")
             return redirect(url_for("index"))
     token = generate_csrf_token()
-    c = f"""<div class="notice"><strong>⚠️ First time setup – create the admin account.</strong></div>
+    c = f"""<div class="notice"><strong>First time setup – create the admin account.</strong></div>
 <h1>Setup</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
