@@ -471,6 +471,7 @@ BASE = r"""<!DOCTYPE html>
 
 <nav>
   <a href="/">Home</a>
+  <a href="/pages">All Pages</a>
   {% if session.user_id %}
     <span>{{ session.username }} ({{ session.role }})</span>
     {% if session.role in ('admin','writer') %}<a href="/new">New</a>{% endif %}
@@ -1296,6 +1297,24 @@ def delete_user():
         log_action("admin_delete_user", user_id=session["user_id"], username=session["username"], detail=f"deleted user_id {uid}")  #审计日志
         flash("User deleted.", "success")
     return redirect(url_for("admin_panel"))
+
+@app.route("/pages")
+def list_all_pages():
+    #展示所有页面列表（按更新时间倒序）
+    db = get_db()
+    pages = db.execute(
+        "SELECT slug, updated_at FROM pages ORDER BY updated_at DESC"
+    ).fetchall()
+    if pages:
+        items = "".join(
+            f'<li><a href="/{escape_html(p["slug"])}">{escape_html(p["slug"])}</a> <small>(updated {p["updated_at"]})</small></li>'
+            for p in pages
+        )
+        results = f"<ul>{items}</ul>"
+    else:
+        results = "<p>No pages yet.</p>"
+    content = f"<h1>All Pages</h1>{results}"
+    return render_template_string(BASE, title="All Pages", content=content)
 
 @app.route("/search")
 def search():
