@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Zero-JS Wiki (Flask + SQLite) — secure, minimal, no business JavaScript
+Zero-JS Wiki v0.01 (Flask + SQLite) — secure, minimal, no business JavaScript
 
 - Run:
    Windows PowerShell: $env:SECRET_KEY="your-key"; python app.py
@@ -60,6 +60,14 @@ app.config.update(
 DATABASE = os.environ.get("WIKI_DB", "wiki.db")
 # ALLOW_REGISTRATION = False      # 禁止公开注册
 ALLOW_REGISTRATION = os.environ.get("ALLOW_REGISTRATION", "false").lower() == "true"     # 用环境变量控制是否允许公开注册
+
+SETUP_KEY = os.environ.get("SETUP_KEY")
+if SETUP_KEY is None:
+    # 避免数据库空白的瞬间抢注管理员，故生成一个随机 key 并打印到终端
+    import secrets
+    SETUP_KEY = secrets.token_hex(16)
+    print(f"SETUP_KEY not set. Using temporary key: {SETUP_KEY}")
+
 
 LOCKOUT_THRESHOLD = 3       # 连续失败次数（增高以避免恶意锁定）
 LOCKOUT_DURATION = 1       # 锁定分钟数
@@ -129,7 +137,7 @@ def close_db(exception):
     db = g.pop("db", None)
     if db is not None:
         db.close()
-#在 login_rate 和 register_rate 表上为 timestamp 列创建索引（177/182）
+        
 def init_db():
     with app.app_context():
         db = get_db()
@@ -233,9 +241,9 @@ def add_security_headers(response):
         "default-src 'none'; "  #默认拒绝所有资源
         "connect-src 'self'; "  #允许向本站发起网络请求-预留扩展性，目前不使用
         "img-src 'self' data:; "  #只允许同源图片和 data: URI-验证码是 data: 格式，必须允许；站内图片也需允许
-        "style-src 'unsafe-inline'; "  #允许内联样式-因为模板里直接嵌入 <style> 块，不得不保留。可考虑未来用外部 CSS 移除它
-        #"script-src 'none'; "  #禁止任何脚本执行,但与js检测脚本冲突
-        "script-src 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #禁止除js检测脚本外的脚本（通过hash判断）
+        "style-src 'sha256-HM30yCUQyP0su1RGk+Xd3P5Xqg4dSZR0+ZTe/+qkNCM='; "  #禁止非指定的内联样式（通过hash判断）
+        "script-src 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #禁止非指定的脚本（通过hash判断）
+        "script-src-elem 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #兼容性；禁止非指定的脚本（通过hash判断）
         "base-uri 'self'; "  #限制 <base> 标签只能指向本站，防止攻击者用 <base> 劫持页面内链接
         "form-action 'self'; "  #只允许表单提交到本站，防止攻击者把你的表单提交到外部恶意网址
         "frame-ancestors 'none'; "  #禁止页面被嵌入 <iframe>，防止点击劫持
@@ -444,9 +452,14 @@ BASE = r"""<!DOCTYPE html>
 <style>
   *{box-sizing:border-box}
   body{margin:0;padding:0;color:#1d1d1d;background:#fefefe;font-family:sans-serif}
-  nav{padding:.5em 1em;background:#f0f0f0;font-size:1em;line-height:1.5}
-  nav a,nav form{display:inline-block;margin-right:1em}
-  nav form button{background:none;border:none;cursor:pointer;text-decoration:underline;font:inherit}
+  nav{display:flex;flex-wrap:wrap;align-items:baseline;gap:0.8em;padding:0.3em 1em;background:#f0f0f0;font-size:1em;line-height:1.3}
+  nav a,nav span{white-space:nowrap;color:inherit;text-decoration:none}
+  nav form{display:inline;margin:0}
+  nav form input[type="hidden"]{display:none !important}
+  nav form button{background:none;border:none;padding:0;margin:0;font:inherit;color:inherit;text-decoration:underline;cursor:pointer;line-height:inherit;vertical-align:baseline}
+  #search-form{display:inline-flex;align-items:center;gap:0.3em;margin:0}
+  #search-form input[type="text"]{width:auto !important;display:inline-block !important;margin:0 !important;height:2em;box-sizing:border-box;padding:0 6px;border:1px solid #aaa;font:inherit;line-height:1}
+  #search-form input[type="submit"]{height:2em;box-sizing:border-box;padding:0 10px;border:1px solid #aaa;background:#eaeaea;cursor:pointer;font:inherit;line-height:1;margin:0}
   .flash{padding:.5em 1em}
   .flash.success{background:#d4edda}
   .flash.warning{background:#fff3cd}
@@ -454,7 +467,7 @@ BASE = r"""<!DOCTYPE html>
   article{padding:1em;margin:auto;max-width:100ch;font-size:1.25em;line-height:1.75}
   article img{max-width:100%;height:auto}
   textarea{width:100%;min-height:20em;font:inherit}
-  form label,form input:not([type=submit]),form textarea,form select{display:block;margin:.5em 0;width:100%}
+  form label,form input:not([type=submit]):not(#search-form input),form textarea,form select{display:block;margin:.5em 0;width:100%}
   form input[type=submit],form button{margin-top:1em}
   .js-status{margin:0;padding:1em 1.5em;font-weight:bold;border-bottom:2px solid #aaa}
   .js-on{background:#fff3cd;color:#856404}
@@ -463,6 +476,18 @@ BASE = r"""<!DOCTYPE html>
   .error-box{background:#f8d7da;border:2px solid #a94442;padding:1.5em;margin:1em 0;text-align:center}
   .error-box h1{color:#a94442;margin-top:0}
   .honeypot{display:none !important}
+  .captcha-img{border:1px solid #ccc;margin:4px 0}
+  .history-preview{white-space:pre-wrap;background:#f9f9f9;padding:.5em}
+  .admin-table{width:100%;border-collapse:collapse;margin-bottom:1em}
+  .admin-table th,.admin-table td{padding:0.5em 0.75em;text-align:left;border-bottom:1px solid #ddd;vertical-align:middle}
+  .admin-table th{background:#f4f4f4;font-weight:bold}
+  .admin-table td:first-child,.admin-table th:first-child{width:30%}
+  .admin-table td:last-child,.admin-table th:last-child{width:15%}
+  .inline-form{display:inline}
+  .inline-form select,.inline-form button{vertical-align:middle}
+  .danger-link{color:red}
+  .danger-btn{color:red;background:none;border:1px solid red}
+  .audit-table{width:100%;border-collapse:collapse;font-size:0.9em}
 </style>
 </head>
 <body>
@@ -477,16 +502,16 @@ BASE = r"""<!DOCTYPE html>
     {% if session.role in ('admin','writer') %}<a href="/new">New</a>{% endif %}
     {% if session.role == 'admin' %}<a href="/admin">Manage Users</a>{% endif %}
     <a href="/change_password">Change Password</a>
-    <form method="post" action="/logout" style="display:inline">
+    <form method="post" action="/logout">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
       <button type="submit">Logout</button>
     </form>
   {% else %}
     <a href="/login">Login</a>{% if allow_registration %} <a href="/register">Register</a>{% endif %}
   {% endif %}
-  <form method="get" action="/search" style="display:inline; margin-left:1em;">
-    <input type="text" name="q" placeholder="Search..." style="width:auto; display:inline;">
-    <input type="submit" value="Go" style="display:inline; margin-left:0.5em;">
+  <form id="search-form" method="get" action="/search">
+    <input type="text" name="q" placeholder="Search...">
+    <input type="submit" value="Go">
   </form>
 </nav>
 
@@ -724,7 +749,7 @@ def edit_page(slug):
         db.commit()
         return redirect(url_for("view_page", slug=slug) if slug != "home" else url_for("index"))
 
-    existing = page["content_md"] if page else ""
+    existing = escape_html(page["content_md"]) if page else ""
     token = generate_csrf_token()
     safe_slug = escape_html(slug)
     c = f"""<h1>{'Edit' if page else 'Create'} “{safe_slug}”</h1>
@@ -798,7 +823,7 @@ def page_history(slug):
             # 添加查看完整版本的链接
             view_link = f' <a href="/history/{escape_html(slug)}/{e["id"]}">(old version content)</a>'
             items += f"""<li><strong>{escape_html(e['edited_at'])}</strong> by {user_name}{view_link}<br>
-<pre style="white-space:pre-wrap;background:#f9f9f9;padding:.5em">{preview}…</pre></li>"""
+<pre class="history-preview">{preview}…</pre></li>"""
         c = f"<h1>History for “{escape_html(slug)}”</h1><ul>{items}</ul>"
     return render_template_string(BASE, title=f"History: {slug}", content=c)
 
@@ -930,11 +955,11 @@ def login_form():
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
   <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
-  <label>Username: <input type="text" name="username" required></label>
-  <label>Password: <input type="password" name="password" required></label>
+  <label>Username: <input type="text" name="username" required autocomplete="username"></label>
+  <label>Password: <input type="password" name="password" required autocomplete="current-password"></label>
   <label>
     Verification:<br>
-    <img src="/captcha" alt="CAPTCHA" style="border:1px solid #ccc; margin:4px 0;">
+    <img src="/captcha" alt="CAPTCHA" class="captcha-img">
     <br>
     <input type="text" name="captcha" required autocomplete="off" placeholder="Enter characters">
   </label>
@@ -948,11 +973,11 @@ def register_form():
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
   <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
-  <label>Username: <input type="text" name="username" required></label>
-  <label>Password: <input type="password" name="password" required minlength="8"></label>
+  <label>Username: <input type="text" name="username" required autocomplete="username"></label>
+  <label>Password: <input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
   <label>
     Verification:<br>
-    <img src="/captcha" alt="CAPTCHA" style="border:1px solid #ccc; margin:4px 0;">
+    <img src="/captcha" alt="CAPTCHA" class="captcha-img">
     <br>
     <input type="text" name="captcha" required autocomplete="off" placeholder="Enter characters">
   </label>
@@ -1038,6 +1063,10 @@ def setup():
         return redirect(url_for("index"))
     if request.method == "POST":
         honeypot_check()
+        #setup key 验证
+        if request.form.get("setup_key", "") != SETUP_KEY:
+            flash("Invalid setup key.", "error")
+            return redirect(url_for("setup"))   # 重新显示表单
         username = request.form.get("username", "").strip()
         password = request.form.get("password", "")
         if not username or not password:
@@ -1063,6 +1092,7 @@ def setup():
             session["role"] = "admin"
             flash("Welcome! You are now the admin.", "success")
             return redirect(url_for("index"))
+    #GET 部分增加 setup key 字段
     token = generate_csrf_token()
     c = f"""<div class="notice"><strong>First time setup – create the admin account.</strong></div>
 <h1>Setup</h1>
@@ -1071,6 +1101,7 @@ def setup():
   <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <label>Username: <input type="text" name="username" required></label>
   <label>Password: <input type="password" name="password" required minlength="8"></label>
+  <label>Setup Key: <input type="password" name="setup_key" required></label>
   <input type="submit" value="Create Admin">
 </form>"""
     return render_template_string(BASE, title="Setup", content=c)
@@ -1121,8 +1152,8 @@ def change_password():
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
   <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
-  <label>Old password: <input type="password" name="old_password" required></label>
-  <label>New password: <input type="password" name="new_password" required minlength="8"></label>
+  <label>Old password: <input type="password" name="old_password" required autocomplete="current-password"></label>
+  <label>New password: <input type="password" name="new_password" required minlength="8" autocomplete="new-password"></label>
   <input type="submit" value="Change">
 </form>"""
     return render_template_string(BASE, title="Change Password", content=c)
@@ -1145,22 +1176,22 @@ def admin_panel():
         safe_name = escape_html(u['username'])
         rows += f"""<tr>
           <td>{safe_name}</td>
-          <td><form method="post" action="/admin/change_role" style="display:inline">
+          <td><form method="post" action="/admin/change_role" class="inline-form">
             <input type="hidden" name="_csrf_token" value="{token}">
             <input type="hidden" name="user_id" value="{u['id']}">
             <select name="new_role">{opts}</select>
             <button type="submit">Change</button></form>
           </td>
-          <td><a href="/admin/delete_user?user_id={u['id']}" style="color:red">Delete</a></td></tr>"""
+          <td><a href="/admin/delete_user?user_id={u['id']}" class="danger-link">Delete</a></td></tr>"""
     c = f"""<h1>User Management</h1>
 <p><a href="/admin/logs">View Audit Logs</a></p>
-<table style="width:100%;border-collapse:collapse"><tr><th>Username</th><th>Role</th><th>Action</th></tr>{rows}</table>
+<table class="admin-table"><tr><th>Username</th><th>Role</th><th>Action</th></tr>{rows}</table>
 <hr><h2>Add User</h2>
 <form method="post" action="/admin/add_user">
   <input type="hidden" name="_csrf_token" value="{token}">
   <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
-  <label>Username: <input type="text" name="username" required></label>
-  <label>Password: <input type="password" name="password" required minlength="8"></label>
+  <label>Username: <input type="text" name="username" required autocomplete="username"></label>
+  <label>Password: <input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
   <label>Role: <select name="role"><option value="reader">reader</option><option value="writer">writer</option><option value="admin">admin</option></select></label>
   <input type="submit" value="Create User">
 </form>"""
@@ -1193,7 +1224,7 @@ def admin_logs():
           <td>{detail}</td>
         </tr>"""
     content = f"""<h1>Audit Logs (Last 200)</h1>
-<table style="width:100%; border-collapse:collapse; font-size:0.9em;">
+<table class="audit-table">
   <tr><th>Timestamp</th><th>User ID</th><th>Username</th><th>Action</th><th>Detail</th></tr>
   {rows}
 </table>
@@ -1219,7 +1250,7 @@ def delete_user_confirm():
 <form method="post" action="/admin/delete_user">
   <input type="hidden" name="_csrf_token" value="{token}">
   <input type="hidden" name="user_id" value="{uid}">
-  <input type="submit" value="Yes, delete" style="color:red; background:none; border:1px solid red;">
+  <input type="submit" value="Yes, delete" class="danger-btn">
   <a href="/admin">Cancel</a>
 </form>"""
     return render_template_string(BASE, title="Delete User", content=content)
