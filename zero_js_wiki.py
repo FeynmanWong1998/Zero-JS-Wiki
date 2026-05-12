@@ -325,7 +325,7 @@ def generate_captcha_image():
     session['captcha_key'] = key   # 仅把随机 key 传给客户端
 
     # 加大画布以适应6位字符
-    img = Image.new('RGB', (160, 50), color=(255, 255, 255))
+    img = Image.new('RGB', (170, 50), color=(255, 255, 255))
     draw = ImageDraw.Draw(img)
 
     # 从内嵌 base64 解码字体
@@ -1331,7 +1331,7 @@ def delete_user():
 
 @app.route("/pages")
 def list_all_pages():
-    #展示所有页面列表（按更新时间倒序），公开可见
+    #展示所有页面列表（按更新时间倒序）
     db = get_db()
     pages = db.execute(
         "SELECT slug, updated_at FROM pages ORDER BY updated_at DESC"
