@@ -3,8 +3,8 @@
 Zero-JS Wiki v0.01 (Flask + SQLite) — secure, minimal, no business JavaScript
 
 - Run:
-   Windows PowerShell: $env:SECRET_KEY="your-key"; python app.py
-   Linux/macOS:        export SECRET_KEY="your-key"; python app.py
+   Windows PowerShell: $env:SECRET_KEY="your-key"; python zero_js_wiki.py
+   Linux/macOS:        export SECRET_KEY="your-key"; python zero_js_wiki.py
 """
 #SPDX-License-Identifier: CC0-1.0
 #SPDX-FileCopyrightText: 2026 Feynman Wong
@@ -1052,8 +1052,10 @@ def logout():
         db = get_db()
         db.execute("UPDATE users SET session_token = NULL WHERE id = ?", (session["user_id"],))
         db.commit()
+    # 先保存 flash 消息，再清空 session
+    msg = "Logged out."
     session.clear()
-    flash("Logged out.", "success")
+    flash(msg, "success")  # flash 会写入新会话，但只含 _flashes，这是安全的
     return redirect(url_for("index"))
 
 @app.route("/setup", methods=["GET", "POST"])
