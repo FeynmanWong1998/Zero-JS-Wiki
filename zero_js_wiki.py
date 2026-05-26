@@ -19,11 +19,12 @@ import html as html_mod
 import sqlite3
 import base64   
 import random
-import io                                    # 新增：在内存中操作图片
+import io                                    # 在内存中操作图片
 import secrets
+import urllib.parse
 import threading
 from datetime import datetime, timezone, timedelta
-from PIL import Image, ImageDraw, ImageFont  # 新增：生成验证码图片
+from PIL import Image, ImageDraw, ImageFont  # 生成验证码图片
 
 try:
     from flask import (
@@ -240,7 +241,7 @@ def add_security_headers(response):
     response.headers['Content-Security-Policy'] = (
         "default-src 'none'; "  #默认拒绝所有资源
         "connect-src 'self'; "  #允许向本站发起网络请求-预留扩展性，目前不使用
-        "img-src 'self' data:; "  #只允许同源图片和 data: URI-验证码是 data: 格式，必须允许；站内图片也需允许
+        "img-src 'self' data: http: https:; "  #暂定，允许外部图片
         "style-src 'sha256-HM30yCUQyP0su1RGk+Xd3P5Xqg4dSZR0+ZTe/+qkNCM='; "  #禁止非指定的内联样式（通过hash判断）
         "script-src 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #禁止非指定的脚本（通过hash判断）
         "script-src-elem 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #兼容性；禁止非指定的脚本（通过hash判断）
@@ -290,6 +291,40 @@ app.jinja_env.globals["csrf_token"] = generate_csrf_token
 captcha_store = {}
 captcha_lock = threading.Lock()
 
+# 保护外部链接
+# 临时存储外部链接令牌（用于隐藏真实URL）
+_redirect_tokens = {}
+_token_lock = threading.Lock()
+TOKEN_EXPIRE_SECONDS = 600   # 令牌有效期10分钟
+
+def store_redirect_token(original_url):
+    """生成一个随机令牌并存储原始URL，返回令牌"""
+    token = secrets.token_urlsafe(16)
+    with _token_lock:
+        # 清理过期令牌
+        now = time.time()
+        expired = [t for t, data in _redirect_tokens.items() if now - data["timestamp"] > TOKEN_EXPIRE_SECONDS]
+        for t in expired:
+            del _redirect_tokens[t]
+        _redirect_tokens[token] = {"url": original_url, "timestamp": now}
+    return token
+
+def consume_redirect_token(token):
+    """取出并删除令牌对应的URL（一次性消费）"""
+    with _token_lock:
+        data = _redirect_tokens.pop(token, None)
+    if data and time.time() - data["timestamp"] <= TOKEN_EXPIRE_SECONDS:
+        return data["url"]
+    return None
+
+def is_valid_token(token):
+    """检查令牌是否存在且未过期（不删除）"""
+    with _token_lock:
+        data = _redirect_tokens.get(token)
+        if data and time.time() - data["timestamp"] <= TOKEN_EXPIRE_SECONDS:
+            return True
+    return False
+
 # ---------------------------------------------------------------------------
 # Honeypot&Captcha check
 # ---------------------------------------------------------------------------
@@ -325,7 +360,7 @@ def generate_captcha_image():
     session['captcha_key'] = key   # 仅把随机 key 传给客户端
 
     # 加大画布以适应6位字符
-    img = Image.new('RGB', (170, 50), color=(255, 255, 255))
+    img = Image.new('RGB', (170, 100), color=(255, 255, 255))
     draw = ImageDraw.Draw(img)
 
     # 从内嵌 base64 解码字体
@@ -338,27 +373,27 @@ def generate_captcha_image():
     # 为每个字符单独旋转后粘贴
     for i, ch in enumerate(code):
         # 创建临时透明画布
-        char_img = Image.new('RGBA', (30, 40), (255, 255, 255, 0))
+        char_img = Image.new('RGBA', (30, 50), (255, 255, 255, 0))
         char_draw = ImageDraw.Draw(char_img)
         char_draw.text((0, 0), ch, fill=(0, 0, 0), font=font)
         rotated = char_img.rotate(random.randint(-30, 30), expand=1, fillcolor=(255, 255, 255, 0))
         x = 8 + i * 26 + random.randint(-2, 2)
-        y = random.randint(2, 8)
+        y = random.randint(15, 35)
         img.paste(rotated, (x, y), rotated)
 
     # 彩色干扰线
     for _ in range(5):
-        x1 = random.randint(0, 60)
-        y1 = random.randint(0, 45)
+        x1 = random.randint(0, 70)
+        y1 = random.randint(0, 90)
         x2 = random.randint(100, 160)
-        y2 = random.randint(0, 45)
+        y2 = random.randint(0, 90)
         color = (random.randint(100, 200), random.randint(100, 200), random.randint(100, 200))
         draw.line([(x1, y1), (x2, y2)], fill=color)
 
     # 高密度噪点
-    for _ in range(400):
-        x = random.randint(0, 159)
-        y = random.randint(0, 49)
+    for _ in range(600):
+        x = random.randint(0, 170)
+        y = random.randint(0, 100)
         draw.point((x, y), fill=(random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)))
 
     # 整体轻微旋转
@@ -389,29 +424,51 @@ def generate_session_token():
 # Markdown
 # ---------------------------------------------------------------------------
 class WikiRenderer(mistune.HTMLRenderer):
-    #Convert [text](#slug) to /slug, and [text](##anchor) to #anchor"""
-
     def heading(self, text, level):
         #为标题生成 id，例如 '## My Section' -> <h2 id="my-section">My Section</h2>
         # 生成 id：小写，去掉首尾空格，替换空格为连字符，仅保留字母数字和连字符
         slug_id = re.sub(r'[^\w\s-]', '', text.lower()).strip().replace(' ', '-')
         return f'<h{level} id="{slug_id}">{text}</h{level}>'
-    
+
     def link(self, text, url, title=None):
         if url.startswith("##"):
-            # 页内锚点：例如 [go](##section) → <a href="#section">go</a>
+         # 页内锚点：例如 [go](##section) → <a href="#section">go</a>
             anchor = url[2:]
             # 去掉一个 #，保留剩余部分作为锚点；仅允许合法字符，防止不规范输入
             if not re.fullmatch(r"[a-zA-Z0-9_\-\.]+", anchor):
                 anchor = ''
             # 不合法则忽略，生成 # 链接（回到顶部）
             url = f'#{anchor}'
+        # 处理内部 Wiki 链接 [page](#slug) → /slug
         elif url.startswith("#") and not url.startswith("#!"):
-            # 内部 Wiki 链接：[page](#slug) → /slug
             slug = url[1:]
             if re.fullmatch(r"[a-zA-Z0-9_\-]+", slug):
                 url = f"/{slug}"
+            else:
+                url = "#"
+
+        # 相对路径或锚点，直接保留
+        if url.startswith(('/', '#')):
+            return super().link(text, url, title)
+
+        # 所有外部 http/https 链接：生成令牌，跳转到受保护路由
+        if url.startswith(('http://', 'https://')):
+            from flask import url_for
+            token = store_redirect_token(url)          # 生成令牌，隐藏真实URL
+            protected_url = url_for('protected_link', token=token, _external=False)
+            return super().link(text, protected_url, title)
+
+        # 其他协议（mailto: 等）原样保留
         return super().link(text, url, title)
+    
+    def image(self, text, url, title=None):
+        from urllib.parse import urlparse
+        allowed = ('.png', '.jpg', '.jpeg', '.gif')
+        if urlparse(url).path.lower().endswith(allowed):
+            return super().image(text, url, title)
+        else:
+            # 可选：返回一个带样式的提示
+            return f'<span class="unsafe-image">[Blocked unsafe image: {escape_html(text)}]</span>'
 
 
 def md2html(md_text: str) -> str:
@@ -1391,6 +1448,75 @@ def captcha_image():
     response.headers['Content-Type'] = 'image/png'
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0'
     return response
+
+#受保护链接路由
+@app.route("/protected_link", methods=["GET", "POST"])
+def protected_link():
+    if request.method == "GET":
+        token = request.args.get("token", "")
+        if not token or not is_valid_token(token):
+            flash("Invalid or expired link.", "error")
+            return redirect(url_for("index"))
+        return render_protected_link_form(token, error=False)
+
+    if request.method == "POST":
+        honeypot_check()
+        token = request.form.get("token", "")
+        if not token:
+            flash("Invalid request.", "error")
+            return redirect(url_for("index"))
+
+        # CSRF 检查
+        if session.get("_csrf_token") != request.form.get("_csrf_token", ""):
+            abort(403)
+
+        # 验证码检查
+        if not verify_captcha(request.form.get("captcha", "")):
+            return render_protected_link_form(token, error=True)
+
+        # 验证成功，消费令牌获取真实URL
+        original_url = consume_redirect_token(token)
+        if not original_url:
+            flash("Link expired or invalid.", "error")
+            return redirect(url_for("index"))
+
+        # 显示链接让用户点击
+        return render_link_confirmation(original_url)
+
+def render_protected_link_form(token, error=False):
+    """生成验证码表单（不显示真实URL）"""
+    error_msg = '<div class="flash error">Incorrect verification code. Please try again.</div>' if error else ''
+    csrf_token = generate_csrf_token()
+    content = f"""<h1>External Link Protection</h1>
+<p>This link is external. Please enter the verification code to continue.</p>
+{error_msg}
+<form method="post">
+  <input type="hidden" name="_csrf_token" value="{csrf_token}">
+  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input type="hidden" name="token" value="{escape_html(token)}">
+  <label>
+    Verification Code:<br>
+    <img src="/captcha" alt="CAPTCHA" class="captcha-img">
+    <br>
+    <input type="text" name="captcha" required autocomplete="off" placeholder="Enter characters">
+  </label>
+  <input type="submit" value="Verify and Continue">
+</form>
+<p><a href="/">Cancel</a></p>
+"""
+    return render_template_string(BASE, title="Link Protection", content=content)
+
+def render_link_confirmation(original_url):
+    """显示验证通过后的确认页面，包含可点击的外部链接"""
+    safe_url = escape_html(original_url)
+    # 注意：href 中直接使用原始 URL，但需要确保协议安全（只允许 http/https）
+    content = f"""<h1>External Link Verification Passed</h1>
+<p>The link you requested has been verified. You can now access it by clicking the button below.</p>
+<p><strong>URL:</strong> <a href="{safe_url}" rel="noreferrer noopener" target="_blank">{safe_url}</a></p>
+<p><a href="{safe_url}" rel="noreferrer noopener" target="_blank">Continue to external site</a></p>
+<p>Or <a href="/">return to home page</a>.</p>
+"""
+    return render_template_string(BASE, title="External Link", content=content)
 
 # ---------- Error handlers ----------
 @app.errorhandler(404)
