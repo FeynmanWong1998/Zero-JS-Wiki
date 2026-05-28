@@ -616,8 +616,16 @@ def image_captcha():
         honeypot_check()
         # CSRF 已由全局 before_request 自动校验，这里无需重复
         selected = request.form.getlist("selected_tokens")
-        expected = session.get('img_captcha_answer', [])
         next_url = request.form.get("next", "")  # 保存来源页面，失败/过期时原路带回
+        expected = session.get('img_captcha_answer')
+        if expected is None:
+            flash("验证码数据已失效，请重新验证。", "error")
+            # 清除可能残留的 session 数据
+            session.pop('img_captcha_mapping', None)
+            session.pop('img_captcha_answer', None)
+            session.pop('img_captcha_target', None)
+            session.pop('img_captcha_expire', None)
+            return redirect(url_for("image_captcha", next=next_url))
         # 检查验证码是否过期
         expire = session.get('img_captcha_expire', 0)
         if time.time() > expire:
@@ -636,22 +644,15 @@ def image_captcha():
             session.pop('img_captcha_answer', None)
             session.pop('img_captcha_target', None)
             session.pop('img_captcha_expire', None)
-            # 改为一次性令牌：生成 token，写入 session，有效期 120 秒（仅够一次跳转）
-            one_time_token = secrets.token_urlsafe(16)
-            session['img_captcha_one_time_token'] = one_time_token
-            session['img_captcha_one_time_expire'] = time.time() + CAPTCHA_ONE_TIME_EXPIRE
-            # 重定向到原来请求的页面，附带一次性令牌
+            # 纯 session 方案：验证通过后设置 session 标志，有效期 120 秒
+            session['img_captcha_verified'] = True
+            session['img_captcha_verified_expire'] = time.time() + CAPTCHA_ONE_TIME_EXPIRE
+            # 重定向到原来请求的页面（无需 URL 令牌）
             next_url = request.form.get("next") or url_for("index")
             # 防止开放重定向：只允许相对路径
             if not is_safe_redirect(next_url):
                 next_url = url_for("index")
-            # 将 token 附加到 next_url 的查询参数中
-            parsed = urllib.parse.urlparse(next_url)
-            query = urllib.parse.parse_qs(parsed.query)
-            query['_ctoken'] = [one_time_token]
-            new_query = urllib.parse.urlencode(query, doseq=True)
-            redirect_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
-            return redirect(redirect_url)
+            return redirect(next_url)
         else:
             flash("验证失败，请重试。", "error")
             # 清除旧的 session 数据，强制重新生成
@@ -666,24 +667,23 @@ def generate_session_token():
     return secrets.token_hex(32)  #生成64字符会话令牌
 
 def validate_captcha_token():
-    # GET 阶段：验证 URL 中的 _ctoken 是否与 session 令牌匹配（不消费）。
-    token = request.args.get("_ctoken", "")
-    if not token:
+    # GET 阶段：检查 session 中是否存在有效的验证标志（不消费）。
+    if not session.get('img_captcha_verified'):
         return False
-    stored = session.get('img_captcha_one_time_token')
-    expire = session.get('img_captcha_one_time_expire', 0)
-    return stored == token and time.time() < expire
+    expire = session.get('img_captcha_verified_expire', 0)
+    return time.time() < expire
 
 def has_valid_captcha():
-    # POST 阶段：检查 session 中是否存在有效的验证令牌（不消费）。
-    stored = session.get('img_captcha_one_time_token')
-    expire = session.get('img_captcha_one_time_expire', 0)
-    return bool(stored) and time.time() < expire
+    # POST 阶段：检查 session 中是否存在有效的验证标志（不消费）。
+    if not session.get('img_captcha_verified'):
+        return False
+    expire = session.get('img_captcha_verified_expire', 0)
+    return time.time() < expire
 
 def consume_captcha_token():
-    # 销毁 session 中的验证令牌（登录/注册/外链操作成功后调用）。
-    session.pop('img_captcha_one_time_token', None)
-    session.pop('img_captcha_one_time_expire', None)
+    # 销毁 session 中的验证标志（登录/注册/外链操作成功后调用）。
+    session.pop('img_captcha_verified', None)
+    session.pop('img_captcha_verified_expire', None)
 
 
 # ---------------------------------------------------------------------------
