@@ -66,8 +66,10 @@ if SETUP_KEY is None:
 # ---------------------------------------------------------------------------
 # Config — tunable constants
 # ---------------------------------------------------------------------------
-LOCKOUT_THRESHOLD = 3            # 连续失败次数（增高以避免恶意锁定）
-LOCKOUT_DURATION = 1             # 锁定分钟数
+
+#登录连续失败锁定
+LOCKOUT_THRESHOLD = 3            # 登录连续失败锁定触发次数
+LOCKOUT_DURATION = 1             # 登录连续失败锁定分钟数
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # 全局速率限制阈值（基于 SQLite 实现）
@@ -81,15 +83,17 @@ SESSION_IDLE_TIMEOUT = 7200      # 空闲超时秒数（120分钟）
 MAX_CONTENT_SIZE = 200 * 1024    # 页面内容最大字节数（200 KB）
 
 # 验证码
-CAPTCHA_EXPIRE_SECONDS = 600     # 验证码过期秒数（10分钟）
+CAPTCHA_EXPIRE_SECONDS = 120     # 验证码过期秒数
 CAPTCHA_ONE_TIME_EXPIRE = 120    # 一次性令牌过期秒数
-CAPTCHA_RATE_WINDOW = 60         # 验证码频率窗口秒数
-CAPTCHA_RATE_MAX = 10            # 每分钟最大验证码生成次数
+CAPTCHA_RATE_WINDOW = 60         # 验证码频率窗口秒数（per session）
+CAPTCHA_RATE_MAX = 10            # 每分钟每 session 最大验证码生成次数
+GLOBAL_CAPTCHA_MAX = 1000         # 每分钟全局最大验证码生成次数（极端滥用时的熔断机制）
+GLOBAL_CAPTCHA_WINDOW = 60       # 全局窗口秒数
 CAPTCHA_IMG_SIZE = (150, 150)    # 验证码图片尺寸
 CAPTCHA_CATEGORY_NAMES = {'A': '车', 'B': '狗', 'C': '猫'}  # 分类显示名
 
 # 外部链接令牌
-REDIRECT_TOKEN_EXPIRE = 600      # 过期秒数（10分钟）
+REDIRECT_TOKEN_EXPIRE = 120      # 过期秒数
 
 # 历史记录
 HISTORY_MAX = 100                # 每页最大历史记录数
@@ -120,6 +124,10 @@ def check_global_login_rate():
 def check_global_register_rate():
     # 注册速率检查+记录。返回 True 表示超限。
     return _check_and_record_rate("register_rate", GLOBAL_LOGIN_MAX, GLOBAL_LOGIN_WINDOW)
+
+def check_global_captcha_rate():
+    # 全局验证码生成速率检查+记录。返回 True 表示超限（防 DoS）。
+    return _check_and_record_rate("captcha_rate", GLOBAL_CAPTCHA_MAX, GLOBAL_CAPTCHA_WINDOW)
 
 # =========================================================================
 # HTML escape helper
@@ -188,6 +196,11 @@ def init_db():
                 timestamp REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_register_rate_timestamp ON register_rate(timestamp);
+            CREATE TABLE IF NOT EXISTS captcha_rate (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_captcha_rate_timestamp ON captcha_rate(timestamp);
                CREATE TABLE IF NOT EXISTS audit_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL DEFAULT (datetime('now')),
@@ -271,7 +284,7 @@ def add_security_headers(response):
         "default-src 'none'; "  #默认拒绝所有资源
         "connect-src 'self'; "  #允许向本站发起网络请求-预留扩展性，目前不使用
         "img-src 'self' data: http: https:; "  #暂定，允许外部图片
-        "media-src 'self' data:; "  #兼容性，firefox报错
+        "media-src 'self' data:; "  #兼容性
         "style-src 'sha256-lOXUs6TNsoWvTiaTQcb1+IWSbBbl8ictp+2YTiCJJGw='; "  #禁止非指定的内联样式（通过hash判断）
         "script-src 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #禁止非指定的脚本（通过hash判断）
         "script-src-elem 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #兼容性；禁止非指定的脚本（通过hash判断）
@@ -383,7 +396,7 @@ def log_action(action, user_id=None, username=None, detail=""):
 
 #Captcha check：返回某类别下所有图片的绝对路径列表
 _image_list_cache = {}       # {cat: (timestamp, [paths])}
-_IMAGE_CACHE_TTL = 60        # 60秒刷新一次目录扫描
+_IMAGE_CACHE_TTL = 1000        # 60秒刷新一次目录扫描
 
 def get_images_in_category(cat):
     # 返回某类别下的图片绝对路径列表（带缓存）
@@ -593,7 +606,11 @@ def captcha_img(token):
 @app.route("/image_captcha", methods=["GET", "POST"])
 def image_captcha():
     if request.method == "GET":
-        # 频率限制
+        # 全局速率限制（防 DoS）
+        if check_global_captcha_rate():
+            flash("Too many captcha requests. Please wait a moment.", "error")
+            return redirect(url_for("index"))
+        # 每 session 频率限制
         allowed, err_msg = check_captcha_rate_limit()
         if not allowed:
             flash(err_msg, "error")
