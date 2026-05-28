@@ -661,14 +661,15 @@ def image_captcha():
             session.pop('img_captcha_answer', None)
             session.pop('img_captcha_target', None)
             session.pop('img_captcha_expire', None)
-            # 纯 session 方案：验证通过后设置 session 标志，有效期 120 秒
-            session['img_captcha_verified'] = True
-            session['img_captcha_verified_expire'] = time.time() + CAPTCHA_ONE_TIME_EXPIRE
+            # 纯 session 方案：验证通过后设置 session 标志，有效期 120 秒，限定目标路径
             # 重定向到原来请求的页面（无需 URL 令牌）
             next_url = request.form.get("next") or url_for("index")
             # 防止开放重定向：只允许相对路径
             if not is_safe_redirect(next_url):
                 next_url = url_for("index")
+            session['img_captcha_verified'] = True
+            session['img_captcha_verified_expire'] = time.time() + CAPTCHA_ONE_TIME_EXPIRE
+            session['img_captcha_verified_for'] = next_url
             return redirect(next_url)
         else:
             flash("验证失败，请重试。", "error")
@@ -685,10 +686,19 @@ def generate_session_token():
 
 def validate_captcha_token():
     # GET 阶段：检查 session 中是否存在有效的验证标志（不消费）。
+    # 验证标志限定路径——为 /login 验证的不应用于 /register 或 /protected_link。
     if not session.get('img_captcha_verified'):
         return False
     expire = session.get('img_captcha_verified_expire', 0)
-    return time.time() < expire
+    if time.time() > expire:
+        return False
+    verified_for = session.get('img_captcha_verified_for', '')
+    if verified_for:
+        # 只比较路径（去掉查询参数），因为 request.path 不含 ?token=xxx
+        verified_path = urllib.parse.urlparse(verified_for).path
+        if verified_path != request.path:
+            return False
+    return True
 
 def has_valid_captcha():
     # POST 阶段：检查 session 中是否存在有效的验证标志（不消费）。
@@ -701,6 +711,7 @@ def consume_captcha_token():
     # 销毁 session 中的验证标志（登录/注册/外链操作成功后调用）。
     session.pop('img_captcha_verified', None)
     session.pop('img_captcha_verified_expire', None)
+    session.pop('img_captcha_verified_for', None)
 
 
 # ---------------------------------------------------------------------------
