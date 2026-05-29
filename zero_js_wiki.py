@@ -98,6 +98,9 @@ REDIRECT_TOKEN_EXPIRE = 120      # 过期秒数
 # 历史记录
 HISTORY_MAX = 100                # 每页最大历史记录数
 
+# 审计日志
+LOG_PAGE_SIZE = 200              # 每页日志条数
+
 def _check_and_record_rate(table_name, max_allowed, window_sec):
     # 事务性速率检查+记录。超限返回 True，否则记录并返回 False。
     db = get_db()
@@ -285,7 +288,7 @@ def add_security_headers(response):
         "connect-src 'self'; "  #允许向本站发起网络请求-预留扩展性，目前不使用
         "img-src 'self' data: http: https:; "  #暂定，允许外部图片
         "media-src 'self' data:; "  #兼容性
-        "style-src 'sha256-lOXUs6TNsoWvTiaTQcb1+IWSbBbl8ictp+2YTiCJJGw='; "  #禁止非指定的内联样式（通过hash判断）
+        "style-src 'sha256-YP3ofrOZapiLEdike0PDe0XLhNAYmpJLtlEmdtg4aCE='; "  #禁止非指定的内联样式（通过hash判断）
         "script-src 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #禁止非指定的脚本（通过hash判断）
         "script-src-elem 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #兼容性；禁止非指定的脚本（通过hash判断）
         "base-uri 'self'; "  #限制 <base> 标签只能指向本站，防止攻击者用 <base> 劫持页面内链接
@@ -383,6 +386,7 @@ def is_valid_token(token):
 
 def honeypot_check():
     if request.form.get("email_confirm", "").strip():
+        log_action("bot_detected", detail=f"path={request.path}")
         abort(400)
 
 #审计日志
@@ -396,7 +400,7 @@ def log_action(action, user_id=None, username=None, detail=""):
 
 #Captcha check：返回某类别下所有图片的绝对路径列表
 _image_list_cache = {}       # {cat: (timestamp, [paths])}
-_IMAGE_CACHE_TTL = 1000        # 60秒刷新一次目录扫描
+_IMAGE_CACHE_TTL = 1000        # 刷新一次目录扫描的间隔时间（s）
 
 def get_images_in_category(cat):
     # 返回某类别下的图片绝对路径列表（带缓存）
@@ -749,8 +753,8 @@ class WikiRenderer(mistune.HTMLRenderer):
         if url.startswith(('http://', 'https://')):
             token = store_redirect_token(url)          # 生成令牌，隐藏真实URL
             if token is None:
-                # 令牌池满，降级为直接链接（仍有 rel=noreferrer 保护）
-                return super().link(text, url, title)
+                # 令牌池满，不暴露裸链接——否则攻击者可故意填满令牌池来绕过保护
+                return f'<span class="unsafe-image">[Link temporarily unavailable: {escape_html(text)}]</span>'
             protected_url = url_for('protected_link', token=token, _external=False)
             return super().link(text, protected_url, title)
 
@@ -830,7 +834,7 @@ BASE = r"""<!DOCTYPE html>
   .notice{background:#f0f0f0;padding:1em;border-left:4px solid #bbb;margin:1em 0}
   .error-box{background:#f8d7da;border:2px solid #a94442;padding:1.5em;margin:1em 0;text-align:center}
   .error-box h1{color:#a94442;margin-top:0}
-  .honeypot{display:none !important}
+  .form-row{display:none !important}
   .history-preview{white-space:pre-wrap;background:#f9f9f9;padding:.5em}
   .admin-table{width:100%;border-collapse:collapse;margin-bottom:1em}
   .admin-table th,.admin-table td{padding:0.5em 0.75em;text-align:left;border-bottom:1px solid #ddd;vertical-align:middle}
@@ -1019,7 +1023,7 @@ def new_page():
             c = f"""<h1>New Page</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
-  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <label>Slug (URL name): <input type="text" name="slug" required pattern="[a-zA-Z0-9_\\-]+" placeholder="e.g. my-page" value="{safe_slug}"></label>
   <label>Content (Markdown):</label>
   <textarea name="content" placeholder="Write here...">{safe_content}</textarea>
@@ -1059,7 +1063,7 @@ def new_page():
     c = f"""<h1>New Page</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
-  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <label>Slug (URL name): <input type="text" name="slug" required pattern="[a-zA-Z0-9_\\-]+" placeholder="e.g. my-page"></label>
   <label>Content (Markdown):</label>
   <textarea name="content" placeholder="Write here..."></textarea>
@@ -1093,7 +1097,7 @@ def edit_page(slug):
             c = f"""<h1>{'Edit' if page else 'Create'} “{safe_slug}”</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
-  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <textarea name="content" placeholder="Markdown content...">{escape_html(existing)}</textarea>
   <input type="submit" value="Save">
 </form>"""
@@ -1129,7 +1133,7 @@ def edit_page(slug):
     c = f"""<h1>{'Edit' if page else 'Create'} “{safe_slug}”</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
-  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <textarea name="content" placeholder="Markdown content...">{existing}</textarea>
   <input type="submit" value="Save">
 </form>"""
@@ -1162,7 +1166,7 @@ def delete_page(slug):
 <p>Are you sure?</p>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
-  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <input type="submit" value="Yes, delete">
   <a href="/{safe_slug}">Cancel</a>
 </form>"""
@@ -1270,6 +1274,8 @@ def login():
         if not has_valid_captcha():
             next_url = request.full_path
             return redirect(url_for('image_captcha', next=next_url))
+        # 立即消费令牌——无论后续登录结果如何，单次验证仅限单次 POST 尝试
+        consume_captcha_token()
 
         honeypot_check()
 
@@ -1295,11 +1301,10 @@ def login():
                 return redirect(url_for("login"))
 
             if check_password_hash(user["password_hash"], password):
-                # 登录成功 —— 先检查速率（含原子性记录），通过后再消费令牌
+                # 登录成功 —— 先检查速率（含原子性记录）
                 if check_global_login_rate():
                     flash("Too many login attempts. Please wait a moment.", "error")
                     return redirect(url_for('image_captcha', next=request.full_path))
-                consume_captcha_token()
 
                 # 事务性更新：重置失败计数 + 写入新会话令牌
                 new_token = generate_session_token()
@@ -1328,11 +1333,10 @@ def login():
                     return redirect(next_url)
                 return redirect(url_for("index"))
             else:
-                # 密码错误 —— 先检查速率（含原子性记录），通过后再消费令牌
+                # 密码错误 —— 先检查速率（含原子性记录）
                 if check_global_login_rate():
                     flash("Too many login attempts. Please wait a moment.", "error")
                     return redirect(url_for('image_captcha', next=request.full_path))
-                consume_captcha_token()
 
                 # 登录失败：递增计数器并可能锁定
                 log_action("login_failed", user_id=user["id"], username=user["username"], detail="wrong password")  #审计日志
@@ -1346,11 +1350,10 @@ def login():
                 flash("Invalid username or password.", "error")
                 return redirect(url_for("login"))
         else:
-            # 用户不存在 —— 先检查速率（含原子性记录），通过后再消费令牌
+            # 用户不存在 —— 先检查速率（含原子性记录）
             if check_global_login_rate():
                 flash("Too many login attempts. Please wait a moment.", "error")
                 return redirect(url_for('image_captcha', next=request.full_path))
-            consume_captcha_token()
 
             log_action("login_failed", username=username, detail="nonexistent user")  #审计日志
             flash("Invalid username or password.", "error")
@@ -1366,7 +1369,7 @@ def login_form():
     return f"""<h1>Login</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
-  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <label>Username: <input type="text" name="username" required autocomplete="username"></label>
   <label>Password: <input type="password" name="password" required autocomplete="current-password"></label>
   <input type="submit" value="Login">
@@ -1378,7 +1381,7 @@ def register_form():
     return f"""<h1>Register</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
-  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <label>Username: <input type="text" name="username" required autocomplete="username"></label>
   <label>Password: <input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
   <input type="submit" value="Register">
@@ -1422,6 +1425,8 @@ def register():
         if not has_valid_captcha():
             next_url = request.full_path
             return redirect(url_for('image_captcha', next=next_url))
+        # 立即消费令牌——无论后续注册结果如何
+        consume_captcha_token()
 
         honeypot_check()
 
@@ -1436,11 +1441,10 @@ def register():
             if db.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone():
                 flash("Username already taken.", "error")
             else:
-                # 先检查速率（含原子性记录），通过后再消费令牌
+                # 先检查速率（含原子性记录），通过后再创建用户
                 if check_global_register_rate():
                     flash("Too many registration attempts. Please wait a moment.", "error")
                     return render_template_string(BASE, title="Register", content=register_form()), 429
-                consume_captcha_token()
 
                 # 事务性：创建用户 + 写入会话令牌
                 new_token = generate_session_token()
@@ -1529,7 +1533,7 @@ def setup():
 <h1>Setup</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
-  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <label>Username: <input type="text" name="username" required></label>
   <label>Password: <input type="password" name="password" required minlength="8"></label>
   <label>Setup Key: <input type="password" name="setup_key" required></label>
@@ -1550,7 +1554,6 @@ def change_password():
         return redirect(url_for("login"))
 
     if request.method == "POST":
-        honeypot_check()   #似乎有兼容性问题？
         old_pw = request.form.get("old_password", "")
         new_pw = request.form.get("new_password", "")
         if not old_pw or not new_pw:
@@ -1582,7 +1585,7 @@ def change_password():
     c = f"""<h1>Change Password</h1>
 <form method="post">
   <input type="hidden" name="_csrf_token" value="{token}">
-  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <label>Old password: <input type="password" name="old_password" required autocomplete="current-password"></label>
   <label>New password: <input type="password" name="new_password" required minlength="8" autocomplete="new-password"></label>
   <input type="submit" value="Change">
@@ -1610,6 +1613,7 @@ def admin_panel():
           <td><form method="post" action="/admin/change_role" class="inline-form">
             <input type="hidden" name="_csrf_token" value="{token}">
             <input type="hidden" name="user_id" value="{u['id']}">
+            <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
             <select name="new_role">{opts}</select>
             <button type="submit">Change</button></form>
           </td>
@@ -1620,7 +1624,7 @@ def admin_panel():
 <hr><h2>Add User</h2>
 <form method="post" action="/admin/add_user">
   <input type="hidden" name="_csrf_token" value="{token}">
-  <input class="honeypot" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
   <label>Username: <input type="text" name="username" required autocomplete="username"></label>
   <label>Password: <input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
   <label>Role: <select name="role"><option value="reader">reader</option><option value="writer">writer</option><option value="admin">admin</option></select></label>
@@ -1637,10 +1641,21 @@ def admin_logs():
     if check:
         return check
     db = get_db()
-    # 获取最近 200 条日志，按时间倒序
+
+    total = db.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    page = request.args.get("page", 1, type=int)
+    if page < 1:
+        page = 1
+    total_pages = max(1, (total + LOG_PAGE_SIZE - 1) // LOG_PAGE_SIZE)
+    if page > total_pages:
+        page = total_pages
+    offset = (page - 1) * LOG_PAGE_SIZE
+
     logs = db.execute(
-        "SELECT * FROM audit_log ORDER BY id DESC LIMIT 200"
+        "SELECT * FROM audit_log ORDER BY id DESC LIMIT ? OFFSET ?",
+        (LOG_PAGE_SIZE, offset)
     ).fetchall()
+
     rows = ""
     for l in logs:
         ts = escape_html(l["timestamp"]) if l["timestamp"] else ""
@@ -1655,13 +1670,50 @@ def admin_logs():
           <td>{action}</td>
           <td>{detail}</td>
         </tr>"""
-    content = f"""<h1>Audit Logs (Last 200)</h1>
+
+    # 分页导航
+    pager = ""
+    if total_pages > 1:
+        prev_link = f'<a href="/admin/logs?page={page-1}">← Prev</a>' if page > 1 else '← Prev'
+        next_link = f'<a href="/admin/logs?page={page+1}">Next →</a>' if page < total_pages else 'Next →'
+        pager = f'<p>{prev_link} | Page {page}/{total_pages} | {next_link}</p>'
+
+    token = generate_csrf_token()
+    content = f"""<h1>Audit Logs ({total} total)</h1>
+{pager}
 <table class="audit-table">
   <tr><th>Timestamp</th><th>User ID</th><th>Username</th><th>Action</th><th>Detail</th></tr>
   {rows}
 </table>
+{pager}
+<p><a href="/admin/clear_logs" class="danger-link">Clear All Logs</a></p>
 <p><a href="/admin">← Back to Admin</a></p>"""
     return render_template_string(BASE, title="Audit Logs", content=content)
+
+@app.route("/admin/clear_logs", methods=["GET", "POST"])
+def clear_logs():
+    check = require_login(role="admin")
+    if check:
+        return check
+    if request.method == "GET":
+        token = generate_csrf_token()
+        content = f"""<h1>Clear All Audit Logs?</h1>
+<p>Are you sure? This cannot be undone.</p>
+<form method="post" action="/admin/clear_logs">
+  <input type="hidden" name="_csrf_token" value="{token}">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input type="submit" value="Yes, clear all logs" class="danger-btn">
+  <a href="/admin/logs">Cancel</a>
+</form>"""
+        return render_template_string(BASE, title="Clear Logs", content=content)
+    # POST
+    honeypot_check()
+    db = get_db()
+    db.execute("DELETE FROM audit_log")
+    db.commit()
+    log_action("admin_clear_logs", user_id=session["user_id"], username=session["username"], detail="all logs cleared")
+    flash("All audit logs cleared.", "success")
+    return redirect(url_for("admin_logs"))
 
 @app.route("/admin/delete_user", methods=["GET"])
 def delete_user_confirm():
