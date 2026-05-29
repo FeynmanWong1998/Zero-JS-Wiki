@@ -96,7 +96,8 @@ CAPTCHA_CATEGORY_NAMES = {'A': '车', 'B': '狗', 'C': '猫'}  # 分类显示名
 REDIRECT_TOKEN_EXPIRE = 120      # 过期秒数
 
 # 历史记录
-HISTORY_MAX = 100                # 每页最大历史记录数
+HISTORY_MAX = 100                # 每页最多保留的历史记录条数（超出自动裁剪）
+HISTORY_PAGE_SIZE = 50           # 每页显示的历史记录条数
 
 # 审计日志
 LOG_PAGE_SIZE = 200              # 每页日志条数
@@ -380,6 +381,40 @@ def is_valid_token(token):
             return True
     return False
 
+# =========================================================================
+# 验证码服务端存储（防止答案泄露到客户端 cookie）
+# =========================================================================
+_captcha_store = {}           # {captcha_id: {mapping, answer, target, expire}}
+_captcha_lock = threading.Lock()
+_MAX_CAPTCHA_STORE = 1000     # 防止内存耗尽
+
+def _clean_captcha_store():
+    with _captcha_lock:
+        now = time.time()
+        expired = [cid for cid, data in _captcha_store.items() if now > data["expire"]]
+        for cid in expired:
+            del _captcha_store[cid]
+
+def _get_captcha_data():
+    # 从服务端存储获取当前验证码数据。返回 dict 或 None（不存在/已过期）。
+    captcha_id = session.get('img_captcha_id')
+    if not captcha_id:
+        return None
+    with _captcha_lock:
+        data = _captcha_store.get(captcha_id)
+        if not data:
+            return None
+        if time.time() > data["expire"]:
+            return None
+        return data
+
+def _delete_captcha_data():
+    # 从 session 和存储中同时删除验证码数据。
+    captcha_id = session.pop('img_captcha_id', None)
+    if captcha_id:
+        with _captcha_lock:
+            _captcha_store.pop(captcha_id, None)
+
 # ---------------------------------------------------------------------------
 # Honeypot&Captcha_check&log_action
 # ---------------------------------------------------------------------------
@@ -462,13 +497,21 @@ def generate_image_captcha():
     # 答案：目标类别下所有图片的 token
     answer_tokens = [item['token'] for item in selected_items if item['category'] == target_cat]
     
-    # 存入 session
-    session['img_captcha_mapping'] = token_to_path
-    session['img_captcha_answer'] = answer_tokens
-    session['img_captcha_target'] = target_cat
-    # 可选：设置验证码生成时间，用于过期控制（10分钟）
-    session['img_captcha_expire'] = time.time() + CAPTCHA_EXPIRE_SECONDS
-    
+    # 服务端存储：仅 session 中存 captcha_id，敏感数据不进入客户端 cookie
+    captcha_id = secrets.token_urlsafe(16)
+    expire = time.time() + CAPTCHA_EXPIRE_SECONDS
+    with _captcha_lock:
+        _clean_captcha_store()
+        if len(_captcha_store) >= _MAX_CAPTCHA_STORE:
+            return None, None, None
+        _captcha_store[captcha_id] = {
+            "mapping": token_to_path,
+            "answer": answer_tokens,
+            "target": target_cat,
+            "expire": expire,
+        }
+    session['img_captcha_id'] = captcha_id
+
     return selected_items, target_cat, answer_tokens
 
 
@@ -525,8 +568,11 @@ def build_captcha_grid_html(selected_items, target_cat, next_url):
 def captcha_img(token):
     # 返回经过随机混淆的图片。每次请求均重新生成随机变换，防止攻击者建立 token→图片 的稳定映射。
     # 要求图片已用 preprocess_images.py 预处理为 150×150 PNG，否则运行时性能会下降。
-    mapping = session.get('img_captcha_mapping')
-    if not mapping or token not in mapping:
+    data = _get_captcha_data()
+    if not data:
+        abort(404)
+    mapping = data["mapping"]
+    if token not in mapping:
         abort(404)
     cat, img_path = mapping[token]
     if not os.path.exists(img_path):
@@ -638,33 +684,17 @@ def image_captcha():
         # CSRF 已由全局 before_request 自动校验，这里无需重复
         selected = request.form.getlist("selected_tokens")
         next_url = request.form.get("next", "")  # 保存来源页面，失败/过期时原路带回
-        expected = session.get('img_captcha_answer')
-        if expected is None:
+        data = _get_captcha_data()
+        if data is None:
             flash("验证码数据已失效，请重新验证。", "error")
-            # 清除可能残留的 session 数据
-            session.pop('img_captcha_mapping', None)
-            session.pop('img_captcha_answer', None)
-            session.pop('img_captcha_target', None)
-            session.pop('img_captcha_expire', None)
+            _delete_captcha_data()
             return redirect(url_for("image_captcha", next=next_url))
-        # 检查验证码是否过期
-        expire = session.get('img_captcha_expire', 0)
-        if time.time() > expire:
-            flash("验证码已过期，请重新验证。", "error")
-            # 清除 session 数据
-            session.pop('img_captcha_mapping', None)
-            session.pop('img_captcha_answer', None)
-            session.pop('img_captcha_target', None)
-            session.pop('img_captcha_expire', None)
-            return redirect(url_for("image_captcha", next=next_url))
-        
+        expected = data["answer"]
+        # 过期检查已由 _get_captcha_data 完成
+
         if set(selected) == set(expected):
             flash("验证通过！", "success")
-            # 清除验证数据
-            session.pop('img_captcha_mapping', None)
-            session.pop('img_captcha_answer', None)
-            session.pop('img_captcha_target', None)
-            session.pop('img_captcha_expire', None)
+            _delete_captcha_data()
             # 纯 session 方案：验证通过后设置 session 标志，有效期 120 秒，限定目标路径
             # 重定向到原来请求的页面（无需 URL 令牌）
             next_url = request.form.get("next") or url_for("index")
@@ -677,11 +707,7 @@ def image_captcha():
             return redirect(next_url)
         else:
             flash("验证失败，请重试。", "error")
-            # 清除旧的 session 数据，强制重新生成
-            session.pop('img_captcha_mapping', None)
-            session.pop('img_captcha_answer', None)
-            session.pop('img_captcha_target', None)
-            session.pop('img_captcha_expire', None)
+            _delete_captcha_data()
             return redirect(url_for("image_captcha", next=next_url))
 
 
@@ -1183,24 +1209,50 @@ def page_history(slug):
         flash("Page not found.", "error")
         return redirect(url_for("index"))
 
+    total = db.execute(
+        "SELECT COUNT(*) FROM page_history WHERE page_id = ?", (page["id"],)
+    ).fetchone()[0]
+
+    page_num = request.args.get("page", 1, type=int)
+    if page_num < 1:
+        page_num = 1
+    total_pages = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+    if page_num > total_pages:
+        page_num = total_pages
+    offset = (page_num - 1) * HISTORY_PAGE_SIZE
+
     logs = db.execute("""
         SELECT h.id, h.content_md, h.edited_at, u.username
         FROM page_history h LEFT JOIN users u ON h.edited_by = u.id
         WHERE h.page_id = ? ORDER BY h.edited_at DESC
-    """, (page["id"],)).fetchall()
+        LIMIT ? OFFSET ?
+    """, (page["id"], HISTORY_PAGE_SIZE, offset)).fetchall()
+
+    # 分页导航
+    pager = ""
+    if total_pages > 1:
+        prev_link = f'<a href="/history/{escape_html(slug)}?page={page_num-1}">← Prev</a>' if page_num > 1 else '← Prev'
+        next_link = f'<a href="/history/{escape_html(slug)}?page={page_num+1}">Next →</a>' if page_num < total_pages else 'Next →'
+        pager = f'<p>{prev_link} | Page {page_num}/{total_pages} | {next_link}</p>'
+
+    # 管理员清空按钮
+    clear_btn = ""
+    if "user_id" in session:
+        user = get_current_user()
+        if user and user["role"] == "admin":
+            clear_btn = f'<p><a href="/history/{escape_html(slug)}/clear" class="danger-link">Clear History for This Page</a></p>'
 
     if not logs:
-        c = "<p>No history yet.</p>"
+        c = f"<h1>History for “{escape_html(slug)}”</h1><p>No history yet.</p>{clear_btn}"
     else:
         items = ""
         for e in logs:
             preview = escape_html(e["content_md"][:150])
             user_name = escape_html(e["username"] or "unknown")
-            # 添加查看完整版本的链接
             view_link = f' <a href="/history/{escape_html(slug)}/{e["id"]}">(old version content)</a>'
             items += f"""<li><strong>{escape_html(e['edited_at'])}</strong> by {user_name}{view_link}<br>
 <pre class="history-preview">{preview}…</pre></li>"""
-        c = f"<h1>History for “{escape_html(slug)}”</h1><ul>{items}</ul>"
+        c = f"<h1>History for “{escape_html(slug)}” ({total} total)</h1>{pager}<ul>{items}</ul>{pager}{clear_btn}"
     return render_template_string(BASE, title=f"History: {slug}", content=c)
 
 @app.route("/history/<slug>/<int:history_id>")
@@ -1237,6 +1289,41 @@ def view_history_version(slug, history_id):
 <hr>
 <p><a href="/history/{escape_html(slug)}">← Back to history</a></p>"""
     return render_template_string(BASE, title=f"History: {slug}", content=content)
+
+@app.route("/history/<slug>/clear", methods=["GET", "POST"])
+def clear_page_history(slug):
+    check = require_login(role="admin")
+    if check:
+        return check
+    slug, valid = validate_slug(slug)
+    if not valid:
+        abort(404)
+    db = get_db()
+    page = db.execute("SELECT id FROM pages WHERE slug = ?", (slug,)).fetchone()
+    if not page:
+        flash("Page not found.", "error")
+        return redirect(url_for("index"))
+
+    if request.method == "GET":
+        token = generate_csrf_token()
+        content = f"""<h1>Clear History for “{escape_html(slug)}”?</h1>
+<p>Are you sure? This will delete all history entries for this page. This cannot be undone.</p>
+<form method="post" action="/history/{escape_html(slug)}/clear">
+  <input type="hidden" name="_csrf_token" value="{token}">
+  <input class="form-row" type="text" name="email_confirm" autocomplete="off" tabindex="-1">
+  <input type="submit" value="Yes, clear all history" class="danger-btn">
+  <a href="/history/{escape_html(slug)}">Cancel</a>
+</form>"""
+        return render_template_string(BASE, title="Clear History", content=content)
+
+    # POST
+    honeypot_check()
+    db.execute("DELETE FROM page_history WHERE page_id = ?", (page["id"],))
+    db.commit()
+    log_action("admin_clear_page_history", user_id=session["user_id"],
+               username=session["username"], detail=f"all history cleared for slug={slug}")
+    flash(f"All history for “{slug}” cleared.", "success")
+    return redirect(url_for("page_history", slug=slug))
 
 # =========================================================================
 # 带验证码的登录路由
@@ -1563,11 +1650,11 @@ def change_password():
         elif not check_password_hash(user["password_hash"], old_pw):
             flash("Old password is incorrect.", "error")
         else:
+            db = get_db()
+            # 事务性：密码哈希 + 新会话令牌 一起提交
+            new_token = generate_session_token()
+            db.execute("BEGIN IMMEDIATE")
             try:
-                db = get_db()
-                # 事务性：密码哈希 + 新会话令牌 一起提交
-                new_token = generate_session_token()
-                db.execute("BEGIN IMMEDIATE")
                 db.execute("UPDATE users SET password_hash = ?, session_token = ? WHERE id = ?",
                            (generate_password_hash(new_pw), new_token, user["id"]))
                 db.execute("COMMIT")
@@ -1577,6 +1664,7 @@ def change_password():
                 flash("Password changed. All other sessions have been invalidated.", "success")
                 return redirect(url_for("index"))
             except Exception as e:
+                db.execute("ROLLBACK")
                 # 打印错误到终端，便于调试
                 print(f"Change password error: {e}", file=sys.stderr)
                 flash("An error occurred while updating the password. Please try again.", "error")
