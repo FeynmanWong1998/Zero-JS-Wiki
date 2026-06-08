@@ -289,7 +289,7 @@ def add_security_headers(response):
         "connect-src 'self'; "  #允许向本站发起网络请求-预留扩展性，目前不使用
         "img-src 'self' data: http: https:; "  #暂定，允许外部图片
         "media-src 'self' data:; "  #兼容性
-        "style-src 'sha256-YP3ofrOZapiLEdike0PDe0XLhNAYmpJLtlEmdtg4aCE='; "  #禁止非指定的内联样式（通过hash判断）
+        "style-src 'sha256-Ak4EjGUUj7bdRiCJsD70+6cd80NesK8qDAVz3sAHSIs='; "  #禁止非指定的内联样式（通过hash判断）
         "script-src 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #禁止非指定的脚本（通过hash判断）
         "script-src-elem 'sha256-+kINJrk1I+GPzMwE7dq7z+zST3o2ihrHTzCFIX+3il8='; "  #兼容性；禁止非指定的脚本（通过hash判断）
         "base-uri 'self'; "  #限制 <base> 标签只能指向本站，防止攻击者用 <base> 劫持页面内链接
@@ -385,7 +385,7 @@ def is_valid_token(token):
 # 验证码服务端存储（防止答案泄露到客户端 cookie）
 # =========================================================================
 _captcha_store = {}           # {captcha_id: {mapping, answer, target, expire}}
-_captcha_lock = threading.Lock()
+_captcha_lock = threading.RLock()
 _MAX_CAPTCHA_STORE = 1000     # 防止内存耗尽
 
 def _clean_captcha_store():
@@ -849,7 +849,7 @@ BASE = r"""<!DOCTYPE html>
   .flash.success{background:#d4edda}
   .flash.warning{background:#fff3cd}
   .flash.error{background:#f8d7da}
-  article{padding:1em;margin:auto;max-width:100ch;font-size:1.25em;line-height:1.75}
+  article{padding:1em;margin:auto;max-width:150ch;font-size:1.05em;line-height:1.5}
   article img{max-width:100%;height:auto}
   textarea{width:100%;min-height:20em;font:inherit}
   form label,form input:not([type=submit]):not(#search-form input),form textarea,form select{display:block;margin:.5em 0;width:100%}
@@ -884,17 +884,17 @@ BASE = r"""<!DOCTYPE html>
 </style>
 </head>
 <body>
-<noscript><div class="js-status js-off"> Strange, it seems the browser's JS is only half disabled? Don't worry, this Wiki works perfectly without JS.</div></noscript>
+<noscript><div class="js-status js-off"> Congratulations, JavaScript has been disabled! Don't worry, this Wiki works perfectly with in noscript. </div></noscript>
 <script>document.write('<div class="js-status js-on">Warning: JS is enabled. It is recommended to disable JS for the safest experience.</div>');</script>
 
 <nav>
   <a href="/">Home</a>
   <a href="/pages">All Pages</a>
   {% if session.user_id %}
-    <span>{{ session.username }} ({{ session.role }})</span>
-    {% if session.role in ('admin','writer') %}<a href="/new">New</a>{% endif %}
+    {% if session.role in ('admin','writer') %}<a href="/new">New Page</a>{% endif %}
     {% if session.role == 'admin' %}<a href="/admin">Manage Users</a>{% endif %}
     <a href="/change_password">Change Password</a>
+    <span>{{ session.username }} ({{ session.role }})</span>
     <form method="post" action="/logout">
       <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
       <button type="submit">Logout</button>
